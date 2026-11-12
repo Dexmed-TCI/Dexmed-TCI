@@ -33,13 +33,24 @@ On Android, open the address in Chrome and choose **Install app** or **Add to Ho
 ## Updating the app later
 
 1. Replace `index.html` in the repository (**Add file** → **Upload files**, then commit).
-2. In `sw.js`, increase the number in `const VERSION = 'dex-tci-v2';` (to `v3`, `v4` and so on). Phones only fetch the new copy when this changes. Edit the file on GitHub with the pencil icon, then commit.
+2. In `sw.js`, increase the number in `const VERSION = 'dex-tci-v4';` (to `v5`, `v6` and so on). Phones only fetch the new copy when this changes. Edit the file on GitHub with the pencil icon, then commit.
 3. Open the app once while online, then close and reopen it to load the new version.
 
 ## Live tracking
 
 Tap **Start now** when the bolus is given, or enter the clock time the infusion started and tap **Start from that time**. The top bar then shows elapsed time, the pump rate to set, predicted Cp, deviation from TCI and time to the next change. The current table row is highlighted and the graphs show a "Now" line. When a step changes, the panel flashes, and Android phones also vibrate. Tracking survives the phone sleeping or the app closing. Inputs are locked until you tap **Stop tracking**.
 
+## Zooming the graphs
+
+- **Phone:** pinch to zoom the time axis, drag with two fingers to move, and double-tap to reset. One finger still reads off values, and vertical swipes still scroll the page.
+- **Laptop:** pinch on the trackpad (or Ctrl/⌘ + scroll) to zoom, click-drag to move, and double-click to reset.
+- **Buttons:** − / + / Reset do the same.
+
+When zoomed in, the concentration axis rescales to the visible data so deviations are easier to see.
+
 ## Caveats
+
+**This app was built for personal use as a TCI simulator and should not be used in patient care or in any clinical context. DO NOT USE THIS APP**
+
 
 The model comes from 18 healthy adult volunteers (20–70 yr, 51–110 kg, BMI 20.6–29.3 kg/m², targets 1–8 ng/mL). The authors state it should be validated in patients before clinical TCI use. Output is decision support only. Check every dose and rate independently.

@@ -1,6 +1,6 @@
 // Service worker: caches the whole app so it works with no network.
 // When you change any file, increase VERSION so phones pick up the new copy.
-const VERSION = 'dex-tci-v2';
+const VERSION = 'dex-tci-v4';
 const FILES = [
   './',
   './index.html',

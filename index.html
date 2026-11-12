@@ -133,6 +133,10 @@
   @keyframes flash { 0%, 100% { box-shadow: none; } 15%, 55% { box-shadow: 0 0 0 4px var(--series-2); } }
   .flash { animation: flash 2.4s ease-out 2; }
   button:disabled { opacity: .45; cursor: not-allowed; }
+  .zoom-btns { display: inline-flex; gap: 6px; }
+  button.icon { width: 38px; padding: 6px 0; font-size: 18px; line-height: 1; }
+  canvas#cpChart, canvas#rateChart { cursor: grab; }
+  canvas.dragging { cursor: grabbing !important; }
   .disclaimer { font-size: 12px; color: var(--text-muted); }
   details summary { cursor: pointer; font-weight: 600; font-size: 13px; }
   details p, details li { font-size: 13px; color: var(--text-secondary); }
@@ -261,8 +265,15 @@
           <option value="60">First 1 h</option>
           <option value="360">First 6 h</option>
           <option value="1440">24 h</option>
+          <option value="custom" hidden>Zoomed</option>
         </select></label>
+      <span class="zoom-btns">
+        <button type="button" class="secondary icon" id="zoomOut" aria-label="Zoom out">−</button>
+        <button type="button" class="secondary icon" id="zoomIn" aria-label="Zoom in">+</button>
+        <button type="button" class="secondary" id="zoomReset" hidden>Reset</button>
+      </span>
     </div>
+    <p class="hint zoom-hint" style="margin:0 0 6px"></p>
     <div class="legend">
       <span><i class="sw" style="background:var(--series-1)"></i>TCI (continuous)</span>
       <span><i class="sw" style="background:var(--series-2)"></i>Step-down schedule</span>
@@ -289,7 +300,8 @@
     </details>
   </section>
 
-  <p class="disclaimer" id="appStatus">App version 2.</p>
+  <p class="disclaimer" id="appStatus">App version 4.</p>
+  <p class="disclaimer" style="color:var(--text-primary);font-weight:600">This app was built for personal use as a TCI simulator and should not be used in patient care or in any clinical context. DO NOT USE THIS APP</p>
   <p class="disclaimer">This is a decision-support calculator. Predictions are typical (population) values for healthy adult volunteers (18 subjects, 20–70 yr, 51–110 kg, BMI 20.6–29.3 kg/m², targets 1–8 ng/mL). The authors noted the model should be validated in patients before clinical TCI use. Individual concentrations vary considerably (interindividual and interoccasion variability on V1, V3 and CL). Verify every dose and rate independently and titrate to clinical effect and haemodynamics.</p>
 </main>
 
@@ -568,93 +580,152 @@ function timeTicks(totalMin, maxTicks) {
   for (const c of cands) if (totalMin / c <= maxTicks) return c;
   return 1440;
 }
-function drawAxes(ctx, box, xMax, yMax, yLabel) {
+function drawAxes(ctx, box, t0, t1, yMin, yMax, yLabel) {
   const { l, t, w, h } = box;
+  const span = t1 - t0;
   ctx.font = '11px system-ui, sans-serif';
   ctx.strokeStyle = cssVar('--grid'); ctx.fillStyle = cssVar('--text-muted'); ctx.lineWidth = 1;
+  const yr = yMax - yMin, dec = yr >= 10 ? 0 : yr >= 2 ? 1 : yr >= 0.2 ? 2 : 3;
   for (let i = 0; i <= 5; i++) {
     const y = t + h - h * i / 5;
     ctx.beginPath(); ctx.moveTo(l, Math.round(y) + .5); ctx.lineTo(l + w, Math.round(y) + .5); ctx.stroke();
     ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-    const v = yMax * i / 5;
-    ctx.fillText(v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(1) : v.toFixed(2), l - 6, y);
+    ctx.fillText((yMin + yr * i / 5).toFixed(dec), l - 6, y);
   }
-  const tk = timeTicks(xMax, Math.max(2, Math.min(10, Math.floor(w / 55))));
+  const useMin = t1 <= 120;
+  const tk = timeTicks(span, Math.max(2, Math.min(10, Math.floor(w / 55))));
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  for (let m = 0; m <= xMax + 1e-9; m += tk) {
-    const x = l + w * m / xMax;
-    ctx.fillText(xMax > 120 ? hm(m) : String(m), x, t + h + 6);
+  for (let m = Math.ceil(t0 / tk - 1e-9) * tk; m <= t1 + 1e-9; m += tk) {
+    const x = l + w * (m - t0) / span;
+    ctx.fillText(useMin ? String(Math.round(m * 100) / 100) : hm(m), x, t + h + 6);
   }
   ctx.fillStyle = cssVar('--text-secondary');
-  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-  ctx.fillText(xMax > 120 ? 'Time (h:mm)' : 'Time (min)', l + w - 70, t + h + 22);
+  ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+  ctx.fillText(useMin ? 'Elapsed (min)' : 'Elapsed (h:mm)', l + w, t + h + 22);
   ctx.save(); ctx.translate(12, t + h / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.fillText(yLabel, 0, 0); ctx.restore();
 }
+
+// ---- Visible time range (shared by both charts) ----
+let customView = null;           // {t0, t1} in minutes when zoomed/panned; null = use the Show menu
+const MIN_SPAN = 2;              // minutes
+function totalMinutes() { return last ? last.r.N / last.r.SPM : 1440; }
+function viewRange() {
+  const T = totalMinutes();
+  if (customView) return customView;
+  return { t0: 0, t1: Math.min(T, chartWindow()) };
+}
+function setView(t0, t1) {
+  const T = totalMinutes();
+  let span = Math.min(T, Math.max(MIN_SPAN, t1 - t0));
+  if (t0 < 0) t0 = 0;
+  if (t0 + span > T) t0 = T - span;
+  if (span >= T - 1e-6) {               // zoomed all the way out
+    customView = null; $('viewWin').value = '1440'; $('zoomReset').hidden = true; scheduleRedraw(); return;
+  }
+  customView = { t0, t1: t0 + span };
+  $('viewWin').value = 'custom';
+  $('zoomReset').hidden = false;
+  scheduleRedraw();
+}
+function resetView() {
+  customView = null;
+  $('viewWin').value = 'auto';
+  $('zoomReset').hidden = true;
+  drawCharts();
+}
+function zoomBy(factor, anchorFrac = 0.5) {
+  const { t0, t1 } = viewRange();
+  const span = t1 - t0, anchor = t0 + span * anchorFrac;
+  const ns = span * factor;
+  setView(anchor - ns * anchorFrac, anchor - ns * anchorFrac + ns);
+}
+let redrawRaf = 0;
+function scheduleRedraw() { if (!redrawRaf) redrawRaf = requestAnimationFrame(() => { redrawRaf = 0; drawCharts(); }); }
 
 function drawCharts() {
   if (!last) return;
   const { r, opts } = last;
   const SPM = r.SPM, a = opts.acc;
-  const winMin = chartWindow();
-  const N = Math.min(r.N, winMin * SPM), totalMin = N / SPM;   // visible window
-  drawnWindow = winMin;
-  const stride = Math.max(1, Math.floor(N / 1500));
+  if (!customView) drawnWindow = chartWindow();
+  const { t0, t1 } = viewRange();
+  const n0 = Math.max(0, Math.floor(t0 * SPM)), n1 = Math.min(r.N, Math.ceil(t1 * SPM));
+  const span = t1 - t0;
+  const stride = Math.max(1, Math.floor((n1 - n0) / 1500));
+  const idx = [];                                  // sample indices to draw
+  for (let n = n0; n < n1; n += stride) idx.push(n);
+  idx.push(n1);
+  const zoomed = !!customView && span < totalMinutes() - 1e-6;
   palette.s1 = cssVar('--series-1'); palette.s2 = cssVar('--series-2');
   palette.muted = cssVar('--text-muted'); palette.surface = cssVar('--surface-1'); palette.text = cssVar('--text-primary');
   setupCanvas($('cpOv')); setupCanvas($('rateOv'));
+  const clip = (ctx, box) => { ctx.save(); ctx.beginPath(); ctx.rect(box.l, box.t - 2, box.w, box.h + 4); ctx.clip(); };
 
   // --- Cp chart ---
   {
     const cv = $('cpChart'); const { ctx, w, h } = setupCanvas(cv);
     const box = { l: 56, t: 10, w: w - 72, h: h - 52 };
-    let ymax = 0;
-    for (let n = 0; n <= N; n += stride) ymax = Math.max(ymax, r.tciCp[n] * (1 + a), r.simCp[n]);
-    ymax = niceMax(ymax * 1.05);
-    const X = m => box.l + box.w * m / totalMin, Y = v => box.t + box.h - box.h * Math.min(v, ymax) / ymax;
+    let lo = Infinity, hi = 0;
+    for (const n of idx) {
+      hi = Math.max(hi, r.tciCp[n] * (1 + a), r.simCp[n]);
+      lo = Math.min(lo, r.tciCp[n] * (1 - a), r.simCp[n]);
+    }
+    let ymin = 0, ymax;
+    if (zoomed && lo > 0) {               // zoomed in: fit the axis to the visible data
+      const pad = (hi - lo) * 0.12 || hi * 0.1;
+      const stepY = niceMax((hi - lo + 2 * pad) / 5);
+      ymin = Math.max(0, Math.floor((lo - pad) / stepY) * stepY);
+      ymax = ymin + stepY * 5;
+      if (ymax < hi) ymax = ymin + Math.ceil((hi - ymin) / stepY) * stepY;
+    } else ymax = niceMax(hi * 1.05);
+    const X = m => box.l + box.w * (m - t0) / span;
+    const Y = v => box.t + box.h - box.h * (Math.min(Math.max(v, ymin), ymax) - ymin) / (ymax - ymin);
     ctx.clearRect(0, 0, w, h);
-    drawAxes(ctx, box, totalMin, ymax, 'Plasma conc. (ng/mL)');
-    // band
+    drawAxes(ctx, box, t0, t1, ymin, ymax, 'Plasma conc. (ng/mL)');
+    clip(ctx, box);
     ctx.beginPath();
-    for (let n = 0; n <= N; n += stride) ctx.lineTo(X(n / SPM), Y(r.tciCp[n] * (1 + a)));
-    for (let n = Math.floor(N / stride) * stride; n >= 0; n -= stride) ctx.lineTo(X(n / SPM), Y(r.tciCp[n] * (1 - a)));
+    idx.forEach((n, i) => { const xx = X(n / SPM), yy = Y(r.tciCp[n] * (1 + a)); i ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy); });
+    for (let i = idx.length - 1; i >= 0; i--) ctx.lineTo(X(idx[i] / SPM), Y(r.tciCp[idx[i]] * (1 - a)));
     ctx.closePath(); ctx.fillStyle = cssVar('--band'); ctx.fill();
     const line = (arr, col) => {
       ctx.beginPath(); ctx.lineWidth = 2; ctx.strokeStyle = col; ctx.lineJoin = 'round';
-      for (let n = 0; n <= N; n += stride) { const xx = X(n / SPM), yy = Y(arr[n]); n === 0 ? ctx.moveTo(xx, yy) : ctx.lineTo(xx, yy); }
-      ctx.lineTo(X(totalMin), Y(arr[N])); ctx.stroke();
+      idx.forEach((n, i) => { const xx = X(n / SPM), yy = Y(arr[n]); i ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy); });
+      ctx.stroke();
     };
-    line(r.tciCp, cssVar('--series-1'));
-    line(r.simCp, cssVar('--series-2'));
-    charts.cp = { box, totalMin, X, Y, ymax };
+    line(r.tciCp, palette.s1);
+    line(r.simCp, palette.s2);
+    ctx.restore();
+    charts.cp = { box, t0, t1, n0, n1, X, Y };
   }
   // --- Rate chart ---
   {
     const cv = $('rateChart'); const { ctx, w, h } = setupCanvas(cv);
     const box = { l: 56, t: 10, w: w - 72, h: h - 52 };
     const k = 60 / opts.wt;  // µg/min -> µg/kg/h
-    // TCI's first seconds can be huge (bolus) – scale on the schedule and on TCI after 1 min
+    // TCI's first seconds can be huge (bolus) – scale on the schedule, and on TCI after 1 min
     let ymax = 0;
-    for (let n = 0; n < N; n++) ymax = Math.max(ymax, r.simR[n] * k);
-    for (let n = Math.min(N - 1, SPM); n < N; n++) ymax = Math.max(ymax, r.tciR[n] * k);
+    for (let n = n0; n < Math.min(n1, r.N); n++) ymax = Math.max(ymax, r.simR[n] * k);
+    for (let n = Math.max(n0, SPM); n < Math.min(n1, r.N); n++) ymax = Math.max(ymax, r.tciR[n] * k);
     ymax = niceMax(ymax * 1.08);
-    const X = m => box.l + box.w * m / totalMin, Y = v => box.t + box.h - box.h * Math.min(v, ymax) / ymax;
+    const X = m => box.l + box.w * (m - t0) / span, Y = v => box.t + box.h - box.h * Math.min(v, ymax) / ymax;
     ctx.clearRect(0, 0, w, h);
-    drawAxes(ctx, box, totalMin, ymax, 'Rate (µg/kg/h)');
-    // TCI (smooth)
-    ctx.beginPath(); ctx.lineWidth = 2; ctx.strokeStyle = cssVar('--series-1');
-    for (let n = 0; n < N; n += stride) { const xx = X(n / SPM), yy = Y(r.tciR[n] * k); n === 0 ? ctx.moveTo(xx, yy) : ctx.lineTo(xx, yy); }
+    drawAxes(ctx, box, t0, t1, 0, ymax, 'Rate (µg/kg/h)');
+    clip(ctx, box);
+    ctx.beginPath(); ctx.lineWidth = 2; ctx.strokeStyle = palette.s1;
+    idx.forEach((n, i) => { const nn = Math.min(n, r.N - 1), xx = X(n / SPM), yy = Y(r.tciR[nn] * k); i ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy); });
     ctx.stroke();
-    // schedule (step)
-    ctx.beginPath(); ctx.strokeStyle = cssVar('--series-2'); ctx.lineWidth = 2;
-    let prevY = null, n = 0;
-    while (n < N) {
+    ctx.beginPath(); ctx.strokeStyle = palette.s2; ctx.lineWidth = 2;
+    let prevY = null, n = n0;
+    const nEnd = Math.min(n1, r.N);
+    while (n < nEnd) {
       const R0 = r.simR[n], yy = Y(R0 * k), xx = X(n / SPM);
       if (prevY === null) ctx.moveTo(xx, yy); else { ctx.lineTo(xx, prevY); ctx.lineTo(xx, yy); }
       prevY = yy;
-      while (n < N && r.simR[n] === R0) n++;
+      while (n < nEnd && r.simR[n] === R0) n++;
     }
-    ctx.lineTo(X(totalMin), prevY); ctx.stroke();
-    charts.rate = { box, totalMin, X, Y, ymax };
+    if (prevY !== null) ctx.lineTo(X(t1), prevY);
+    ctx.stroke();
+    ctx.restore();
+    charts.rate = { box, t0, t1, n0, n1, X, Y };
   }
   drawOverlays();
 }
@@ -686,8 +757,7 @@ function drawOverlay(key) {
 
   // Live "now" marker
   const nowN = trackStep();
-  const winN = Math.round(c.totalMin * r.SPM);
-  if (nowN !== null && nowN <= winN) {
+  if (nowN !== null && nowN >= c.n0 && nowN <= c.n1) {
     const x = c.X(nowN / r.SPM), xx = Math.round(x) + .5;
     ctx.strokeStyle = palette.text; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(xx, c.box.t); ctx.lineTo(xx, c.box.t + c.box.h); ctx.stroke();
@@ -702,8 +772,8 @@ function drawOverlay(key) {
   // Hover crosshair + tooltip
   const h = hoverState[key];
   if (!h || h.px < c.box.l || h.px > c.box.l + c.box.w) { tt.style.display = 'none'; return; }
-  const mins = (h.px - c.box.l) / c.box.w * c.totalMin;
-  const n = Math.min(winN, Math.max(0, Math.round(mins * r.SPM)));
+  const mins = c.t0 + (h.px - c.box.l) / c.box.w * (c.t1 - c.t0);
+  const n = Math.min(c.n1, Math.max(c.n0, Math.round(mins * r.SPM)));
   const nr = Math.min(r.N - 1, n);
   const xx = Math.round(h.px) + .5;
   ctx.strokeStyle = palette.muted; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
@@ -739,6 +809,7 @@ function attachHover(key) {
   let raf = 0;
   const render = () => { raf = 0; drawOverlay(key); };
   cv.addEventListener('pointermove', e => {
+    if (gesture.active) return;
     const rect = cv.getBoundingClientRect();
     hoverState[key] = { px: e.clientX - rect.left, py: e.clientY - rect.top };
     if (!raf) raf = requestAnimationFrame(render);
@@ -748,6 +819,86 @@ function attachHover(key) {
     hoverState[key] = null; drawOverlay(key);
   });
 }
+
+// ---------------- Zoom & pan gestures ----------------
+const gesture = { active: false };
+function attachZoom(key) {
+  const cv = $(ovMap[key].cv);
+  const box = () => charts[key] ? charts[key].box : { l: 0, w: cv.clientWidth };
+  const relX = clientX => clientX - cv.getBoundingClientRect().left;
+  const frac = x => Math.min(1, Math.max(0, (x - box().l) / box().w));
+
+  // Mouse: drag to pan
+  let drag = null;
+  cv.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;
+    const v = viewRange(); drag = { x: e.clientX, v, moved: false };
+    try { cv.setPointerCapture(e.pointerId); } catch (err) { }
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    if (!drag.moved && Math.abs(dx) < 3) return;
+    drag.moved = true; gesture.active = true; cv.classList.add('dragging');
+    hoverState[key] = null;
+    const dt = dx / box().w * (drag.v.t1 - drag.v.t0);
+    setView(drag.v.t0 - dt, drag.v.t1 - dt);
+  });
+  const endDrag = () => { drag = null; gesture.active = false; cv.classList.remove('dragging'); };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', endDrag);
+
+  // Trackpad pinch (arrives as ctrl+wheel) or Ctrl/Cmd + scroll wheel: zoom. Sideways scroll: pan.
+  cv.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const d = Math.max(-50, Math.min(50, e.deltaY));
+      zoomBy(Math.exp(d * 0.012), frac(relX(e.clientX)));
+    } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 0) {
+      e.preventDefault();
+      const v = viewRange(), dt = e.deltaX / box().w * (v.t1 - v.t0);
+      setView(v.t0 + dt, v.t1 + dt);
+    }
+  }, { passive: false });
+  cv.addEventListener('dblclick', e => { e.preventDefault(); resetView(); });
+
+  // Touch: two-finger pinch zooms, two-finger drag pans, double-tap resets.
+  // One finger still scrubs the values (and vertical swipes scroll the page).
+  let pinch = null, lastTap = 0;
+  cv.addEventListener('touchstart', e => {
+    if (e.touches.length >= 2) {
+      e.preventDefault();
+      const x1 = relX(e.touches[0].clientX), x2 = relX(e.touches[1].clientX);
+      pinch = { v: viewRange(), cx: (x1 + x2) / 2, d: Math.max(24, Math.abs(x1 - x2)) };
+      gesture.active = true; hoverState[key] = null; drawOverlay(key);
+    } else if (e.touches.length === 1) {
+      const now = Date.now();
+      if (now - lastTap < 320) { e.preventDefault(); lastTap = 0; resetView(); }
+      else lastTap = now;
+    }
+  }, { passive: false });
+  cv.addEventListener('touchmove', e => {
+    if (!pinch || e.touches.length < 2) return;
+    e.preventDefault();
+    const x1 = relX(e.touches[0].clientX), x2 = relX(e.touches[1].clientX);
+    const cx = (x1 + x2) / 2, d = Math.max(24, Math.abs(x1 - x2));
+    const span0 = pinch.v.t1 - pinch.v.t0;
+    const anchorT = pinch.v.t0 + frac(pinch.cx) * span0;       // time under the fingers' start point…
+    const ns = span0 * pinch.d / d;
+    const t0 = anchorT - frac(cx) * ns;                         // …stays under the fingers
+    setView(t0, t0 + ns);
+  }, { passive: false });
+  const endPinch = e => { if (e.touches.length < 2 && pinch) { pinch = null; setTimeout(() => { gesture.active = false; }, 50); } };
+  cv.addEventListener('touchend', endPinch);
+  cv.addEventListener('touchcancel', endPinch);
+}
+(function () {
+  const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  const txt = coarse
+    ? 'Pinch to zoom the time axis · drag with two fingers to move · double-tap to reset.'
+    : 'Pinch on the trackpad (or Ctrl/⌘ + scroll) to zoom · drag to move · double-click to reset.';
+  document.querySelectorAll('.zoom-hint').forEach(el => el.textContent = txt);
+})();
 
 // ---------------- Live tracking ----------------
 const TRACK_KEY = 'dexTci.tracking.v1';
@@ -881,7 +1032,7 @@ function tick() {
     }
     lastIdx = idx;
   }
-  if ($('viewWin').value === 'auto' && chartWindow() !== drawnWindow) drawCharts(); else drawOverlays();
+  if (!customView && $('viewWin').value === 'auto' && chartWindow() !== drawnWindow) drawCharts(); else drawOverlays();
 }
 function mmssLong(sec) {
   sec = Math.max(0, Math.ceil(sec));
@@ -901,7 +1052,21 @@ $('trackFrom').addEventListener('click', () => {
   startTracking(d.getTime());
 });
 $('trackStop').addEventListener('click', stopTracking);
-$('viewWin').addEventListener('change', drawCharts);
+$('viewWin').addEventListener('change', () => {
+  if ($('viewWin').value === 'custom') return;
+  customView = null; $('zoomReset').hidden = true; drawCharts();
+});
+$('zoomIn').addEventListener('click', () => zoomBy(0.5, zoomAnchor()));
+$('zoomOut').addEventListener('click', () => zoomBy(2, zoomAnchor()));
+$('zoomReset').addEventListener('click', resetView);
+// Zoom buttons centre on the live marker when tracking and it's in view, else on the middle.
+function zoomAnchor() {
+  const n = trackStep(), v = viewRange();
+  if (n === null || !last) return v.t0 <= 1e-6 ? 0 : 0.5;   // not tracking: keep the start in view if it is
+  const t = n / last.r.SPM;
+  return t >= v.t0 && t <= v.t1 ? (t - v.t0) / (v.t1 - v.t0) : 0.5;
+}
+attachZoom('cp'); attachZoom('rate');
 $('wake').addEventListener('change', () => { if ($('wake').checked && track) requestWake(); else releaseWake(); });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && track) { tick(); if ($('wake').checked) requestWake(); }
@@ -937,10 +1102,10 @@ try {
   const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(() => {
-      st.textContent = 'App version 2 · saved for offline use' + (standalone ? '' : ' — add to your home screen for app-style access') + '.';
-    }).catch(() => { st.textContent = 'App version 2 · offline saving unavailable in this browser.'; });
+      st.textContent = 'App version 4 · saved for offline use' + (standalone ? '' : ' — add to your home screen for app-style access') + '.';
+    }).catch(() => { st.textContent = 'App version 4 · offline saving unavailable in this browser.'; });
   } else if (location.protocol === 'file:') {
-    st.textContent = 'App version 2 · opened as a local file.';
+    st.textContent = 'App version 4 · opened as a local file.';
   }
 })();
 </script>
